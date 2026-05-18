@@ -1,8 +1,41 @@
 const { chromium } = require('playwright');
+const https = require('https');
 
 const EMAIL = process.env.ACL_EMAIL;
 const PASSWORD = process.env.ACL_PASSWORD;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const BASE_URL = 'https://dash.aclclouds.com';
+
+// Send Telegram notification
+async function notify(message) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
+    console.log('[TG] No bot token or chat ID, skipping notification');
+    return;
+  }
+  const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+  const body = JSON.stringify({
+    chat_id: TG_CHAT_ID,
+    text: message,
+    parse_mode: 'HTML'
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        console.log('[TG] Notification sent');
+        resolve(data);
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 (async () => {
   console.log('=== ACLClouds Auto-Renew ===');
@@ -64,12 +97,6 @@ const BASE_URL = 'https://dash.aclclouds.com';
     try {
       await page.waitForURL('**/', { timeout: 15000 });
     } catch (e) {
-      // Check for error messages
-      const errorText = await page.locator('.error, .alert, [class*="error"]').textContent().catch(() => '');
-      if (errorText) {
-        console.error('[FAIL] Login error:', errorText);
-      }
-      // Take screenshot
       await page.screenshot({ path: '/tmp/acl_login_error.png' });
       throw new Error('Login failed - did not redirect to dashboard');
     }
@@ -86,6 +113,7 @@ const BASE_URL = 'https://dash.aclclouds.com';
 
     if (serversResp.errors) {
       console.error('[FAIL] API error:', JSON.stringify(serversResp.errors));
+      await notify(`❌ ACLClouds Renew Failed\nAPI Error: ${JSON.stringify(serversResp.errors)}`);
       process.exit(1);
     }
 
@@ -94,6 +122,7 @@ const BASE_URL = 'https://dash.aclclouds.com';
 
     // Step 6: Renew each server
     let results = [];
+    let hasRenewed = false;
     for (const server of servers) {
       const { uuid, name, can_renew, expires_at } = server.attributes;
       console.log(`\n--- Server: ${name} (${uuid}) ---`);
@@ -121,6 +150,7 @@ const BASE_URL = 'https://dash.aclclouds.com';
         } else {
           console.log(`  ✅ ${name}: Renewed successfully!`);
           results.push(`✅ ${name}: Renewed!`);
+          hasRenewed = true;
         }
       } else {
         console.log(`  ⏳ ${name}: Not available yet (expires: ${expires_at})`);
@@ -128,12 +158,18 @@ const BASE_URL = 'https://dash.aclclouds.com';
       }
     }
 
+    // Step 7: Send Telegram notification
+    const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const msg = `☁️ <b>ACLClouds Auto-Renew</b>\n⏰ ${now}\n\n${results.join('\n')}`;
+    await notify(msg);
+
     console.log('\n=== Summary ===');
     results.forEach(r => console.log(r));
     console.log('\n=== Done ===');
 
   } catch (err) {
     console.error('Error:', err.message);
+    await notify(`❌ ACLClouds Renew Error\n${err.message}`);
     process.exit(1);
   } finally {
     await browser.close();
